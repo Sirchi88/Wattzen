@@ -1,14 +1,18 @@
-import { useMemo, useState } from 'react'
-import { aggregate, kpis, plausibilitaet, type Daily, type Totals } from '../calc/engine'
-import { forecast } from '../calc/forecast'
-import { addMonths, dayOf, daysInMonth, fmtDay, MONTHS_LONG, parts, toDay, todayIso } from '../lib/dates'
-import { eur, eurDigits, kwh, kwhDigits, num, pct } from '../lib/format'
-import type { Model } from '../types'
-import { Info, Num } from '../ui/bits'
-import { Flow, Trend } from './charts'
+import { useMemo, useRef, useState } from 'react'
+import { aggregate, aggregateCustom, intervalExtremes, kpis, plausibilitaet, type Daily, type Totals } from '../calc/engine'
+import { costTable } from '../calc/finance'
+import { customMeters, meterName } from '../calc/meters'
+import { wpEffizienz } from '../calc/smart'
+import { addMonths, dayOf, daysInMonth, fmtDay, fmtDayShort, MONTHS, MONTHS_LONG, parts } from '../lib/dates'
+import { energy, eur, eurDigits, kwhU, num, pct } from '../lib/format'
+import type { Model, RangeTab } from '../types'
+import { Badge, Days, Fold, IconChip, Info, Num, Ring } from '../ui/bits'
+import type { WeatherState } from '../weather'
+import { useAnalysis } from './analysis'
+import { ContractHints, ForecastBasis, ForecastSaldo, Tile } from './cards'
+import { Compare, Flow, ForecastBars, Trend } from './charts'
 
-type Tab = 'last' | 'monat' | 'halb' | 'jahr' | 'zwei' | 'custom'
-const TABS: { value: Tab; label: string }[] = [
+const TABS: { value: RangeTab; label: string }[] = [
   { value: 'last', label: 'Seit letzter Ablesung' },
   { value: 'monat', label: 'Monat' },
   { value: 'halb', label: 'Halbjahr' },
@@ -17,14 +21,7 @@ const TABS: { value: Tab; label: string }[] = [
   { value: 'custom', label: 'Benutzerdefiniert' },
 ]
 
-function Calendar({
-  daily, from, to, onPick,
-}: {
-  daily: Daily
-  from?: number
-  to?: number
-  onPick: (day: number) => void
-}) {
+function Calendar({ daily, from, to, onPick }: { daily: Daily; from?: number; to?: number; onPick: (day: number) => void }) {
   const init = parts(to ?? daily.end)
   const [ym, setYm] = useState(init.y * 12 + init.m)
   const y = Math.floor(ym / 12)
@@ -35,15 +32,15 @@ function Calendar({
   const minYm = parts(daily.start).y * 12 + parts(daily.start).m
   const maxYm = parts(daily.end).y * 12 + parts(daily.end).m
   return (
-    <div className="cal">
+    <div className="card cal">
       <div className="cal-head">
-        <button type="button" className="link" disabled={ym <= minYm} onClick={() => setYm(ym - 1)} aria-label="Vorheriger Monat">
+        <button type="button" className="icon-btn" disabled={ym <= minYm} onClick={() => setYm(ym - 1)} aria-label="Vorheriger Monat">
           ←
         </button>
         <span>
           {MONTHS_LONG[m]} <span className="num">{y}</span>
         </span>
-        <button type="button" className="link" disabled={ym >= maxYm} onClick={() => setYm(ym + 1)} aria-label="Nächster Monat">
+        <button type="button" className="icon-btn" disabled={ym >= maxYm} onClick={() => setYm(ym + 1)} aria-label="Nächster Monat">
           →
         </button>
       </div>
@@ -97,32 +94,28 @@ function Delta({ cur, prev, invert }: { cur: number; prev?: number; invert?: boo
   )
 }
 
-function Tile({
-  label, value, digits, unit, sub, delta,
-}: {
-  label: string
-  value?: number
-  digits: number
-  unit: string
-  sub?: string
-  delta?: React.ReactNode
-}) {
+function Rows({ rows }: { rows: ([string, React.ReactNode] | false | undefined)[] }) {
   return (
-    <div className="tile">
-      <span className="tile-label">{label}</span>
-      <span className="tile-value">
-        <Num v={value} digits={digits} />
-        {value !== undefined && <em>{unit}</em>}
-      </span>
-      <span className="tile-sub num">{sub ?? ' '}</span>
-      {delta}
-    </div>
+    <dl className="rows num">
+      {rows.filter(Boolean).map((r) => {
+        const [k, v] = r as [string, React.ReactNode]
+        return (
+          <div key={k}>
+            <dt>{k}</dt>
+            <dd>{v}</dd>
+          </div>
+        )
+      })}
+    </dl>
   )
 }
 
-export function Dashboard({ model, daily, goEntry }: { model: Model; daily: Daily; goEntry: () => void }) {
-  const [tab, setTab] = useState<Tab>('jahr')
+export function Dashboard({ model, daily, weather, goEntry }: { model: Model; daily: Daily; weather?: WeatherState; goEntry: () => void }) {
+  const s = model.settings
+  const [tab, setTab] = useState<RangeTab>(s.defaultRange)
   const [custom, setCustom] = useState<{ from?: number; to?: number }>({})
+  const tabsRef = useRef<HTMLDivElement>(null)
+  const an = useAnalysis(model, daily, weather)
 
   const range = useMemo(() => {
     const end = daily.end
@@ -147,23 +140,21 @@ export function Dashboard({ model, daily, goEntry }: { model: Model; daily: Dail
   const t = useMemo(() => aggregate(daily, range.from, range.to), [daily, range])
   const k = useMemo(() => kpis(t), [t])
   const prev: Totals | undefined = useMemo(() => {
-    if (!model.settings.yoy || tab === 'zwei') return undefined
+    if (!s.yoy || tab === 'zwei') return undefined
     const pf = addMonths(range.from, -12)
     if (pf < daily.start || t.days < 1) return undefined
     return aggregate(daily, pf, addMonths(range.to, -12))
-  }, [model.settings.yoy, tab, range, daily, t.days])
+  }, [s.yoy, tab, range, daily, t.days])
   const pk = prev ? kpis(prev) : undefined
-  const fc = useMemo(
-    () => (tab === 'jahr' ? forecast(daily, model, toDay(todayIso())) : undefined),
-    [tab, daily, model],
-  )
-  const warnings = useMemo(() => plausibilitaet(t), [t])
+  const warnings = useMemo(() => plausibilitaet(t, s.toleranz), [t, s.toleranz])
+  const costs = useMemo(() => costTable(daily, range.from, range.to), [daily, range])
+  const wpE = useMemo(() => wpEffizienz(daily, range.from, range.to, an.wx, an.clim, s.heizgrenze), [daily, range, an.wx, an.clim, s.heizgrenze])
 
   if (!daily.days.length) {
     return (
       <section className="screen narrow empty">
         <div className="empty-mark" aria-hidden />
-        <h1>{model.readings.length ? 'Noch eine Ablesung, dann gibt’s die erste Auswertung.' : 'Noch keine Ablesung.'}</h1>
+        <h2>{model.readings.length ? 'Noch eine Ablesung, dann gibt’s die erste Auswertung.' : 'Noch keine Ablesung.'}</h2>
         <p>
           {model.readings.length
             ? 'WATTZEN rechnet mit den Unterschieden zwischen zwei Zählerständen. Komm in ein paar Tagen wieder an den Zähler.'
@@ -176,35 +167,48 @@ export function Dashboard({ model, daily, goEntry }: { model: Model; daily: Dail
     )
   }
 
-  const perDay = (v: number) => (t.days ? `${num(v / t.days, 1)} kWh/Tag` : undefined)
-  const startCalc = !daily.readingDays.has(range.from)
-  const endCalc = !daily.readingDays.has(range.to)
+  const h = s.house
+  const pd = (v: number, n = t.days) => (n ? `${num(v / n, 1)} kWh/Tag` : undefined)
+  const pp = (v: number) => (h.personen ? ` · ${num(v / h.personen, 0)} kWh/Person` : '')
+  const E = (v: number) => energy(v)
+  const startCalc = s.markCalc && !daily.readingDays.has(range.from)
+  const endCalc = s.markCalc && !daily.readingDays.has(range.to)
   const ap = t.nPv && k.ev ? t.ersparnis / k.ev : undefined
   const waiting = tab === 'custom' && custom.from !== undefined && custom.to === undefined
-
-  const cards = [
-    { name: 'Haus', kwh: t.haus, share: k.pvAnteilHaus, cost: t.kHaus, show: true, extra: undefined as string | undefined },
-    { name: 'Wärmepumpe', kwh: t.wp, share: k.pvAnteilWP, cost: t.kWP + t.kWPGrund, show: t.nWp > 0, extra: t.nSep > 0 ? 'eigener WP-Tarif' : undefined },
-    {
-      name: 'Wallbox', kwh: t.wb, share: k.pvAnteilWB, cost: t.kWB, show: t.nWb > 0,
-      extra: k.kwh100km !== undefined ? `${num(k.kwh100km, 1)} kWh/100 km` : undefined,
-    },
-  ].filter((c) => c.show)
+  const customs = customMeters(model).filter((c) => c.active)
+  const fixMonat = t.days ? ((t.kGrund + t.kWPGrund + t.kCustGrund) / t.days) * 30.44 : 0
+  const extremes = [
+    { key: 'zb' as const, name: 'Netzbezug' },
+    { key: 'pv' as const, name: 'PV-Ertrag' },
+    { key: 'wp' as const, name: 'Wärmepumpe' },
+    { key: 'wb' as const, name: 'Wallbox' },
+  ]
+    .map((x) => ({ ...x, r: intervalExtremes(daily, x.key, range.from, range.to) }))
+    .filter((x) => x.r && x.r.max.v > 0.05)
 
   return (
     <section className="screen dash">
-      <nav className="tabs" aria-label="Zeitraum">
-        {TABS.map((x) => (
-          <button key={x.value} type="button" className={x.value === tab ? 'on' : ''} aria-current={x.value === tab}
-            onClick={(e) => {
-              setTab(x.value)
-              e.currentTarget.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' })
-            }}
-          >
-            {x.label}
-          </button>
-        ))}
-      </nav>
+      <div className="tabs-wrap">
+        <div className="tabs" ref={tabsRef} role="tablist" aria-label="Zeitraum">
+          {TABS.map((x) => (
+            <button
+              key={x.value}
+              type="button"
+              role="tab"
+              className={x.value === tab ? 'on' : ''}
+              aria-selected={x.value === tab}
+              onClick={(e) => {
+                setTab(x.value)
+                const el = e.currentTarget
+                const bar = tabsRef.current
+                if (bar) bar.scrollTo({ left: el.offsetLeft - (bar.clientWidth - el.clientWidth) / 2, behavior: 'smooth' })
+              }}
+            >
+              {x.label}
+            </button>
+          ))}
+        </div>
+      </div>
 
       {tab === 'custom' && (
         <Calendar
@@ -228,7 +232,7 @@ export function Dashboard({ model, daily, goEntry }: { model: Model; daily: Dail
           <>
             {fmtDay(range.from)}
             {startCalc && <span className="calc">berechnet</span>} – {fmtDay(range.to)}
-            {endCalc && <span className="calc">berechnet</span>} · {t.days} {t.days === 1 ? 'Tag' : 'Tage'}
+            {endCalc && <span className="calc">berechnet</span>} · <Days n={t.days} />
             {range.clipped && tab !== 'custom' && <span className="dim"> · Daten ab {fmtDay(daily.start)}</span>}
           </>
         )}
@@ -236,53 +240,42 @@ export function Dashboard({ model, daily, goEntry }: { model: Model; daily: Dail
 
       {t.days > 0 && !waiting && (
         <div className="dash-body" key={`${tab}-${range.from}-${range.to}`}>
-          <div className="top">
+          {tab === 'jahr' && <ContractHints model={model} today={an.today} />}
+
+          <div className="card hero-card">
             <div className="hero">
-              <span className="eyebrow">Netto-Bilanz</span>
+              <span className="eyebrow">Netto-Bilanz Strom</span>
               <span className="hero-num">
                 <Num v={k.bilanz} digits={eurDigits(k.bilanz)} />
                 <em>€</em>
               </span>
-              <dl className="hero-rows num">
-                <div>
-                  <dt>Bezugskosten</dt>
-                  <dd>{eur(k.kosten)} €</dd>
-                </div>
-                <div>
-                  <dt>Einspeisevergütung</dt>
-                  <dd>−{eur(t.verg)} €</dd>
-                </div>
-                {t.nPv > 0 && (
-                  <div className="sep">
-                    <dt>Ersparnis durch Eigenverbrauch</dt>
-                    <dd>{eur(t.ersparnis)} €</dd>
-                  </div>
-                )}
-              </dl>
+              <Rows
+                rows={[
+                  ['Bezugskosten', `${eur(k.kosten)} €`],
+                  ['Einspeisevergütung', `−${eur(t.verg)} €`],
+                  k.kostenEigene > 0 && ['Eigene Zähler', `${eur(k.kostenEigene)} €`],
+                  t.nPv > 0 && ['Ersparnis durch PV', <span className="acc">{eur(t.ersparnis)} €</span>],
+                ]}
+              />
               <Delta cur={k.bilanz} prev={pk?.bilanz} />
             </div>
-
             <div className="pvhome">
               <span className="eyebrow acc">PV ins Haus statt ins Netz</span>
               {k.ev !== undefined ? (
                 <>
                   <span className="pv-num">
-                    <Num v={k.ev} digits={kwhDigits(k.ev)} />
-                    <em>kWh</em>
+                    <Num v={E(k.ev).v} digits={E(k.ev).digits} />
+                    <em>{E(k.ev).unit}</em>
                   </span>
                   <div className="quota" role="img" aria-label={`Eigenverbrauchsquote ${pct(k.evQuote ?? 0)} Prozent`}>
                     <i style={{ width: `${Math.min(100, Math.max(0, (k.evQuote ?? 0) * 100))}%` }} />
                   </div>
-                  <dl className="hero-rows num">
-                    <div>
-                      <dt>Eigenverbrauchsquote</dt>
-                      <dd>{k.evQuote !== undefined ? `${pct(k.evQuote)} %` : '–'}</dd>
-                    </div>
-                    <div>
-                      <dt>Gegenwert{ap ? ` bei ${num(ap * 100, 1)} ct/kWh` : ''}</dt>
-                      <dd>{eur(t.ersparnis)} €</dd>
-                    </div>
-                  </dl>
+                  <Rows
+                    rows={[
+                      ['Eigenverbrauchsquote', k.evQuote !== undefined ? `${pct(k.evQuote)} %` : '–'],
+                      [`Gegenwert${ap ? ` bei ${num(ap * 100, 1)} ct/kWh` : ''}`, `${eur(t.ersparnis)} €`],
+                    ]}
+                  />
                   {k.pvTeilweise && <p className="fineprint">PV-Ertrag liegt nur für {t.nPv} von {t.days} Tagen vor.</p>}
                   <Delta cur={k.ev} prev={pk?.ev} invert />
                 </>
@@ -298,148 +291,343 @@ export function Dashboard({ model, daily, goEntry }: { model: Model; daily: Dail
             </p>
           ))}
 
-          <div className="tiles">
-            <Tile label="Bezug" value={t.bezug} digits={kwhDigits(t.bezug)} unit="kWh" sub={perDay(t.bezug)} delta={<Delta cur={t.bezug} prev={prev?.bezug} />} />
-            <Tile label="Einspeisung" value={t.ze} digits={kwhDigits(t.ze)} unit="kWh" sub={perDay(t.ze)} delta={<Delta cur={t.ze} prev={prev?.ze} invert />} />
-            <Tile
-              label="PV-Ertrag"
-              value={t.nPv ? t.pv : undefined}
-              digits={kwhDigits(t.pv)}
-              unit="kWh"
-              sub={t.nPv ? `${num(t.pv / t.nPv, 1)} kWh/Tag` : undefined}
-              delta={t.nPv ? <Delta cur={t.pv} prev={prev?.nPv ? prev.pv : undefined} invert /> : null}
-            />
-            <Tile
-              label="Autarkie"
-              value={k.autarkie !== undefined ? k.autarkie * 100 : undefined}
-              digits={0}
-              unit="%"
-              sub={k.gesamt !== undefined && t.nPv ? `${num(k.gesamt / t.nPv, 1)} kWh/Tag Verbrauch` : undefined}
-            />
-            <Tile
-              label="Eigenverbrauch"
-              value={k.evQuote !== undefined ? k.evQuote * 100 : undefined}
-              digits={0}
-              unit="%"
-              sub={k.ev !== undefined && t.nPv ? `${num(k.ev / t.nPv, 1)} kWh/Tag` : undefined}
-            />
+          <div className="rings card">
+            <Ring value={k.autarkie} label="Autarkie" color="acc" />
+            <Ring value={k.evQuote} label="Eigenverbrauch" color="pv" />
+            {t.nWp > 0 && <Ring value={k.pvAnteilWP} label="PV-Anteil WP" color="wp" sub={<Badge kind="geschätzt" />} />}
+            {t.nWb > 0 && <Ring value={k.pvAnteilWB} label="PV-Anteil Wallbox" color="wb" sub={<Badge kind="geschätzt" />} />}
           </div>
 
-          {fc && (
-            <div className="card forecast">
-              <div className="card-head">
-                <h2>Prognose bis 31.12.{fc.year}</h2>
-                <Info label="So wird hochgerechnet">
-                  {fc.method === 'saisonal'
-                    ? 'Der Rest des Jahres folgt dem Tagesprofil des Vorjahres, skaliert mit dem Verhältnis dieses Jahres zum gleichen Vorjahreszeitraum.'
-                    : 'Noch kein vollständiges Vorjahr vorhanden: Der bisherige Tagesschnitt wird linear bis Jahresende fortgeschrieben.'}{' '}
-                  Verglichen werden die Bezugskosten mit gezahlten und noch kommenden Abschlägen.
-                </Info>
-              </div>
-              {model.abschlaege.length ? (
-                <p className="forecast-main">
-                  voraussichtlich{' '}
-                  <b>
-                    <span className="num">
-                      {fc.differenz >= 0 ? '+' : '−'}
-                      {num(Math.abs(fc.differenz), 0)}
-                    </span>{' '}
-                    €
-                  </b>{' '}
-                  {fc.differenz >= 0 ? 'Nachzahlung' : 'Gutschrift'}
-                </p>
-              ) : (
-                <p className="muted">Trag im Elektromeisterbereich deine Abschläge ein, dann steht hier Nachzahlung oder Gutschrift.</p>
-              )}
-              <dl className="hero-rows num cols">
-                <div>
-                  <dt>Jahreskosten</dt>
-                  <dd>{eur(fc.kosten)} €</dd>
-                </div>
-                <div>
-                  <dt>Abschläge gezahlt</dt>
-                  <dd>{eur(fc.abschlaegeGezahlt)} €</dd>
-                </div>
-                <div>
-                  <dt>Abschläge noch offen</dt>
-                  <dd>{eur(fc.abschlaegeKommend)} €</dd>
-                </div>
-                <div>
-                  <dt>Bezug im Jahr</dt>
-                  <dd>{kwh(fc.bezug)} kWh</dd>
-                </div>
-                <div>
-                  <dt>Einspeisung im Jahr</dt>
-                  <dd>{kwh(fc.einsp)} kWh</dd>
-                </div>
-                <div>
-                  <dt>Vergütung im Jahr</dt>
-                  <dd>{eur(fc.verg)} €</dd>
-                </div>
-              </dl>
-              <p className="fineprint">
-                {fc.method === 'saisonal' ? 'Saisonal gewichtet nach Vorjahresprofil' : 'Linear hochgerechnet'}
-                {fc.teiljahr ? ` · Daten erst ab ${fmtDay(fc.from)}` : ''}
-              </p>
+          <h2 className="sec-title">Energie</h2>
+          <div className="tiles">
+            {t.nPv > 0 && (
+              <Tile icon="sun" color="pv" label="PV-Ertrag" value={E(t.pv).v} digits={E(t.pv).digits} unit={E(t.pv).unit}
+                sub={`${pd(t.pv, t.nPv)}${h.kwp ? ` · ${num(t.pv / h.kwp, 0)} kWh/kWp` : ''}`}
+                extra={<Delta cur={t.pv} prev={prev?.nPv ? prev.pv : undefined} invert />} />
+            )}
+            <Tile icon="zap" color="netz" label="Netzbezug" value={E(t.bezug).v} digits={E(t.bezug).digits} unit={E(t.bezug).unit}
+              sub={pd(t.bezug)} extra={<Delta cur={t.bezug} prev={prev?.bezug} />} />
+            <Tile icon="export" color="einsp" label="Einspeisung" value={E(t.ze).v} digits={E(t.ze).digits} unit={E(t.ze).unit}
+              sub={pd(t.ze)} extra={<Delta cur={t.ze} prev={prev?.ze} invert />} />
+            {k.gesamt !== undefined && (
+              <Tile icon="gauge" color="haus" label="Gesamtverbrauch" value={E(k.gesamt).v} digits={E(k.gesamt).digits} unit={E(k.gesamt).unit}
+                sub={`${pd(k.gesamt, t.nPv)}${pp(k.gesamt)}`} />
+            )}
+          </div>
+
+          <div className="card">
+            <div className="card-head">
+              <h2>Netzbezug nach Verbraucher</h2>
             </div>
-          )}
+            <div className="split-rows">
+              {[
+                { name: 'Haus', icon: 'house' as const, color: 'haus' as const, v: Math.max(0, t.netzHaus), est: !t.nImp },
+                ...(t.nWp ? [{ name: 'Wärmepumpe', icon: 'thermo' as const, color: 'wp' as const, v: t.netzWP, est: true }] : []),
+                ...(t.nWb ? [{ name: 'Wallbox', icon: 'plug' as const, color: 'wb' as const, v: t.netzWB, est: true }] : []),
+              ].map((r) => (
+                <div className="split-row" key={r.name}>
+                  <IconChip name={r.icon} color={r.color} size={28} />
+                  <span>{r.name}</span>
+                  <Badge kind={r.est ? 'geschätzt' : 'gemessen'} />
+                  <b className="num">{kwhU(r.v)}</b>
+                  <i className="split-bar" aria-hidden>
+                    <i className={`f-${r.color}`} style={{ width: `${t.bezug > 0 ? Math.min(100, (r.v / t.bezug) * 100) : 0}%` }} />
+                  </i>
+                </div>
+              ))}
+            </div>
+            {t.nImp > 0 && (
+              <p className="fineprint">
+                Gemessen über den WechselRichter-Import: Haus {kwhU(t.netzHaus)}, Wärmepumpe und Wallbox zusammen {kwhU(t.mNetz)}. Geschätzt ist nur die Aufteilung zwischen Wärmepumpe und Wallbox.
+                {k.plausPct !== undefined && (
+                  <>
+                    {' '}
+                    Abgleich mit den Zählern: <span className="num">{k.plausDiff! >= 0 ? '+' : '−'}{num(Math.abs(k.plausDiff!), 1)} kWh ({k.plausPct >= 0 ? '+' : '−'}{num(Math.abs(k.plausPct) * 100, 1)} %)</span>
+                    {Math.abs(k.plausPct) <= s.toleranz ? ' – innerhalb der Toleranz.' : ' – außerhalb der Toleranz.'}
+                  </>
+                )}
+              </p>
+            )}
+            {!t.nImp && (t.nWp > 0 || t.nWb > 0) && (
+              <p className="fineprint">Ohne WechselRichter-Import ist der Netzanteil von Haus, Wärmepumpe und Wallbox geschätzt.</p>
+            )}
+          </div>
 
           <div className="card">
             <div className="card-head">
               <h2>Energiefluss</h2>
               <Info label="So wird der PV-Anteil geschätzt">
-                Rechnerische Schätzung: PV-Strom für Wärmepumpe und Wallbox ist die Differenz zwischen der Einspeisung laut
-                Wechselrichter und der Einspeisung am Zähler. Aufgeteilt wird er
-                {model.settings.splitMethod === 'saison'
+                PV-Strom für Wärmepumpe und Wallbox ist die Differenz zwischen dem Export laut WechselRichter und der Einspeisung am Zähler – das ist gemessen. Geschätzt ist nur, wie er sich verteilt:
+                {s.splitMethod === 'saison'
                   ? ' nach Verbrauch, die Wärmepumpe gewichtet mit einem Saisonfaktor je Monat'
-                  : model.settings.splitMethod === 'anteilig'
+                  : s.splitMethod === 'anteilig'
                     ? ' anteilig nach Verbrauch'
                     : ' zuerst an die Wallbox, der Rest an die Wärmepumpe'}
                 ; was ein Verbraucher nicht aufnehmen kann, geht an den anderen.
               </Info>
             </div>
             <Flow t={t} k={k} />
-            <p className="fineprint">Aufteilung auf Wärmepumpe und Wallbox ist eine rechnerische Schätzung.</p>
           </div>
 
           <div className="consumers">
-            {cards.map((c) => (
-              <div className="card consumer" key={c.name}>
-                <h2>{c.name}</h2>
-                <span className="consumer-num">
-                  <Num v={c.kwh} digits={kwhDigits(c.kwh)} />
-                  <em>kWh</em>
-                </span>
-                <dl className="hero-rows num">
-                  <div>
-                    <dt>PV-Anteil</dt>
-                    <dd>{c.share !== undefined ? `${pct(c.share)} %` : '–'}</dd>
-                  </div>
-                  <div>
-                    <dt>Kosten</dt>
-                    <dd>{eur(c.cost)} €</dd>
-                  </div>
-                  <div>
-                    <dt>pro Tag</dt>
-                    <dd>{num(c.kwh / t.days, 1)} kWh</dd>
-                  </div>
-                </dl>
-                {c.extra && <p className="fineprint">{c.extra}</p>}
+            <div className="card consumer">
+              <h2 className="consumer-head">
+                <IconChip name="house" color="haus" size={28} /> Haus
+              </h2>
+              <span className="consumer-num">{kwhU(t.haus)}</span>
+              <Rows
+                rows={[
+                  ['PV-Anteil', k.pvAnteilHaus !== undefined ? `${pct(k.pvAnteilHaus)} %` : '–'],
+                  ['Kosten', `${eur(t.kHaus)} €`],
+                  ['pro Tag', `${num(t.haus / t.days, 1)} kWh`],
+                  !!h.personen && ['pro Person', `${num(t.haus / h.personen, 0)} kWh`],
+                ]}
+              />
+            </div>
+            {t.nWp > 0 && (
+              <div className="card consumer">
+                <h2 className="consumer-head">
+                  <IconChip name="thermo" color="wp" size={28} /> Wärmepumpe
+                </h2>
+                <span className="consumer-num">{kwhU(t.wp)}</span>
+                <Rows
+                  rows={[
+                    ['PV-Anteil', k.pvAnteilWP !== undefined ? `${pct(k.pvAnteilWP)} %` : '–'],
+                    ['Kosten', `${eur(t.kWP + t.kWPGrund)} €`],
+                    ['pro Tag', `${num(t.wp / t.nWp, 1)} kWh`],
+                    !!h.flaeche && ['pro m²', `${num(t.wp / h.flaeche, 1)} kWh`],
+                    wpE?.kwhProHgt !== undefined && ['je Heizgradtag', `${num(wpE.kwhProHgt, 2)} kWh`],
+                    k.jaz !== undefined && ['Jahresarbeitszahl', num(k.jaz, 2)],
+                  ]}
+                />
+                {t.nSep > 0 && <p className="fineprint">eigener WP-Tarif</p>}
               </div>
-            ))}
+            )}
+            {t.nWb > 0 && (
+              <div className="card consumer">
+                <h2 className="consumer-head">
+                  <IconChip name="plug" color="wb" size={28} /> Wallbox
+                </h2>
+                <span className="consumer-num">{kwhU(t.wb)}</span>
+                <Rows
+                  rows={[
+                    ['PV-Anteil', k.pvAnteilWB !== undefined ? `${pct(k.pvAnteilWB)} %` : '–'],
+                    ['Kosten', `${eur(t.kWB)} €`],
+                    ['pro Tag', `${num(t.wb / t.nWb, 1)} kWh`],
+                    k.kwh100km !== undefined && ['pro 100 km', `${num(k.kwh100km, 1)} kWh`],
+                    !!h.autoAkku && ['Vollladungen', num(t.wb / h.autoAkku, 1)],
+                  ]}
+                />
+              </div>
+            )}
+            {t.nSp > 0 && (
+              <div className="card consumer">
+                <h2 className="consumer-head">
+                  <IconChip name="battery" color="speicher" size={28} /> Speicher
+                </h2>
+                <span className="consumer-num">{kwhU(t.spE)}</span>
+                <Rows
+                  rows={[
+                    ['geladen', kwhU(t.spL)],
+                    ['entladen', kwhU(t.spE)],
+                    ['Wirkungsgrad', k.spEff !== undefined ? `${pct(k.spEff)} %` : '–'],
+                    !!h.speicherKwh && ['Vollzyklen', num(t.spE / h.speicherKwh, 0)],
+                  ]}
+                />
+              </div>
+            )}
+            {customs.map((c) => {
+              const ct = aggregateCustom(daily, c.id, range.from, range.to)
+              if (!ct.n) return null
+              const pc = prev ? aggregateCustom(daily, c.id, addMonths(range.from, -12), addMonths(range.to, -12)) : undefined
+              const dd = Math.max(1, Math.min(c.decimals, 2))
+              return (
+                <div className="card consumer" key={c.id}>
+                  <h2 className="consumer-head">
+                    <IconChip name={c.icon} color={c.color} size={28} /> {meterName(c)}
+                  </h2>
+                  <span className="consumer-num">
+                    {num(ct.qty, Math.min(c.decimals, 1))} {c.unit}
+                  </span>
+                  <Rows
+                    rows={[
+                      ['pro Tag', `${num(ct.qty / ct.n, dd)} ${c.unit}`],
+                      !!h.personen && ['pro Person', `${num(ct.qty / h.personen, 1)} ${c.unit}`],
+                      ct.kosten > 0 && ['Kosten', `${eur(ct.kosten)} €`],
+                      ct.grund > 0 && ['davon Grundgebühr', `${eur(ct.grund)} €`],
+                    ]}
+                  />
+                  {pc && pc.n > 0 && <Delta cur={ct.qty / ct.n} prev={pc.qty / pc.n} />}
+                </div>
+              )
+            })}
           </div>
+
+          {tab === 'jahr' && an.fc && (
+            <div className="card">
+              <div className="card-head">
+                <h2>Prognose bis 31.12.{an.fc.year}</h2>
+                <ForecastBasis fc={an.fc} />
+              </div>
+              <ForecastSaldo fc={an.fc} model={model} />
+              <ForecastBars months={an.fc.months} />
+              <Rows
+                rows={[
+                  ['Stromkosten im Jahr', `${eur(an.fc.jahr.kosten)} €`],
+                  ['Netzbezug im Jahr', kwhU(an.fc.jahr.bezug)],
+                  ['Einspeisung im Jahr', kwhU(an.fc.jahr.einsp)],
+                  ['Vergütung im Jahr', `${eur(an.fc.jahr.verg)} €`],
+                  an.fc.jahr.eigene > 0 && ['Eigene Zähler im Jahr', `${eur(an.fc.jahr.eigene)} €`],
+                ]}
+              />
+              <h3 className="sub-title">Nächste 12 Monate</h3>
+              <Rows
+                rows={[
+                  ['Netzbezug', kwhU(an.fc.next12.bezug)],
+                  ['PV-Ertrag', kwhU(an.fc.next12.pv)],
+                  ['Stromkosten', `${eur(an.fc.next12.kosten)} € (±${Math.round(an.fc.spanne * 100)} %)`],
+                  ['Vergütung', `${eur(an.fc.next12.verg)} €`],
+                  an.fc.next12.abschlaege > 0 && ['Abschläge Strom', `${eur(an.fc.next12.abschlaege)} €`],
+                  an.fc.next12.eigene > 0 && ['Eigene Zähler', `${eur(an.fc.next12.eigene)} €`],
+                ]}
+              />
+              {an.fc.teiljahr && <p className="fineprint">Daten erst ab {fmtDay(daily.start)} – Abschläge zählen ab Datenbeginn.</p>}
+            </div>
+          )}
+
+          <Fold title="Kosten pro Monat" aside={`${eur(costs.sum.saldo)} €`}>
+            <div className="table-scroll">
+              <table className="costs num">
+                <thead>
+                  <tr>
+                    <th>Monat</th>
+                    <th>Fixkosten</th>
+                    <th>Arbeit Strom</th>
+                    <th>davon WP / Wallbox</th>
+                    <th>Vergütung</th>
+                    <th>Eigene Zähler</th>
+                    <th>Saldo</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {costs.rows.map((r) => (
+                    <tr key={r.start}>
+                      <th>
+                        {MONTHS[parts(r.start).m]} {String(parts(r.start).y).slice(2)}
+                        {r.to - r.from < addMonths(r.start, 1) - r.start && <small> {r.to - r.from} T.</small>}
+                      </th>
+                      <td>{eur(r.fix)}</td>
+                      <td>{eur(r.arbeit)}</td>
+                      <td>
+                        {eur(r.wp)} / {eur(r.wb)}
+                      </td>
+                      <td>−{eur(r.verg)}</td>
+                      <td>{eur(r.eigene)}</td>
+                      <td>
+                        <b>{eur(r.saldo)}</b>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <th>Summe</th>
+                    <td>{eur(costs.sum.fix)}</td>
+                    <td>{eur(costs.sum.arbeit)}</td>
+                    <td>
+                      {eur(costs.sum.wp)} / {eur(costs.sum.wb)}
+                    </td>
+                    <td>−{eur(costs.sum.verg)}</td>
+                    <td>{eur(costs.sum.eigene)}</td>
+                    <td>
+                      <b>{eur(costs.sum.saldo)}</b>
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+            <p className="fineprint">Alle Beträge in €. Fixkosten = alle Grundgebühren (Strom, WP-Tarif, eigene Zähler).</p>
+            <Rows
+              rows={[
+                ['Fixkosten pro Monat', `${eur(fixMonat)} €`],
+                k.ctProKwh !== undefined && ['Ø Strompreis inkl. Grundgebühr', `${num(k.ctProKwh, 1)} ct/kWh`],
+                t.nPv > 0 && ['Ersparnis durch PV', `${eur(t.ersparnis)} €`],
+              ]}
+            />
+          </Fold>
+
+          {extremes.length > 0 && (
+            <Fold title="Höchster und niedrigster Tagesdurchschnitt">
+              <Rows
+                rows={extremes.flatMap((x) => [
+                  [`${x.name} höchster`, <>{num(x.r!.max.v, 1)} kWh/Tag <small className="dim">{fmtDayShort(x.r!.max.from)}–{fmtDayShort(x.r!.max.to)}</small></>] as [string, React.ReactNode],
+                  [`${x.name} niedrigster`, <>{num(x.r!.min.v, 1)} kWh/Tag <small className="dim">{fmtDayShort(x.r!.min.from)}–{fmtDayShort(x.r!.min.to)}</small></>] as [string, React.ReactNode],
+                ])}
+              />
+              <p className="fineprint">Über alle vollständigen Ableseintervalle im Zeitraum.</p>
+            </Fold>
+          )}
 
           <div className="card">
             <div className="card-head">
               <h2>Verlauf</h2>
             </div>
-            <Trend daily={daily} from={range.from} to={range.to} yoy={model.settings.yoy} />
+            <Trend daily={daily} from={range.from} to={range.to} yoy={s.yoy} />
           </div>
 
-          {k.spEff !== undefined && (
-            <p className="footline num">
-              Speicher-Wirkungsgrad {pct(k.spEff)} % · geladen {kwh(t.spL)} kWh · entladen {kwh(t.spE)} kWh
-            </p>
+          <Fold title="Vergleich zweier Zähler">
+            <Compare model={model} daily={daily} from={range.from} to={range.to} />
+          </Fold>
+
+          {an.check && (
+            <Fold title="PV-Anlagen-Check" aside={`${pct(an.check.rows[an.check.rows.length - 1].pct)} %`} open={an.check.alarm}>
+              {an.check.alarm && (
+                <p className="note warn">Zwei Monate in Folge unter 85 % des Solls. Verschmutzung, Defekt oder Verschattung?</p>
+              )}
+              <ul className="check">
+                {an.check.rows.slice(-12).map((r) => (
+                  <li key={r.start}>
+                    <span>
+                      {MONTHS[parts(r.start).m]} {String(parts(r.start).y).slice(2)}
+                    </span>
+                    <i className="check-bar" aria-hidden>
+                      <i className={r.pct < 0.85 ? 'low' : ''} style={{ width: `${Math.min(100, (r.pct / 1.3) * 100)}%` }} />
+                      <i className="check-100" />
+                    </i>
+                    <b className="num">{pct(r.pct)} %</b>
+                  </li>
+                ))}
+              </ul>
+              <p className="fineprint">
+                Ist-Ertrag gegen Soll aus gemessener Einstrahlung × {num(h.kwp ?? 0, 1)} kWp × Performance Ratio {num(an.check.prRef, 2)}. Strich = 100 %.
+              </p>
+            </Fold>
+          )}
+
+          {an.amort && (
+            <Fold title="Amortisation PV + Speicher" aside={`${pct(Math.min(1, an.amort.pct))} %`}>
+              <div className="amort">
+                <Ring value={Math.min(1, an.amort.pct)} label="amortisiert" color="acc" size={96} />
+                <Rows
+                  rows={[
+                    ['Investition', `${eur(an.amort.invest)} €`],
+                    ['Nutzen bisher', `${eur(an.amort.nutzen)} €`],
+                    an.amort.geschaetzt > 0 && [
+                      'davon vor der ersten Ablesung',
+                      <>
+                        {eur(an.amort.geschaetzt)} € <Badge kind="geschätzt" />
+                      </>,
+                    ],
+                    ['Nutzen pro Jahr', `${eur(an.amort.proJahr)} €`],
+                    an.amort.tag !== undefined && [
+                      an.amort.pct >= 1 ? 'Amortisiert' : 'Voraussichtlich amortisiert',
+                      an.amort.pct >= 1 ? 'erreicht' : `${MONTHS_LONG[parts(an.amort.tag).m]} ${parts(an.amort.tag).y}`,
+                    ],
+                  ]}
+                />
+              </div>
+              <p className="fineprint">Nutzen = Ersparnis durch Eigenverbrauch + Einspeisevergütung. Die Zeit vor der ersten Ablesung ist aus dem PV-Gesamtzähler geschätzt.</p>
+            </Fold>
           )}
         </div>
       )}

@@ -1,23 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { dayOf, toDay } from '../lib/dates'
+import { toDay } from '../lib/dates'
 import { parseNum } from '../lib/format'
-import { DEFAULT_SETTINGS, type Model, type Reading, type Settings, type Tariff } from '../types'
-import { advise, checkField } from './advice'
+import { checkField, advise } from './advice'
 import { buildDemo } from './demo'
 import { aggregate, buildSeries, computeDaily, kpis, plausibilitaet, splitX, valueAt } from './engine'
-import { abschlagSumme, forecast } from './forecast'
+import { abschlagSumme } from './forecast'
+import { smartForecast, GERMANY } from './smart'
+import { model, rd, tarif } from './testutil'
 
-let id = 0
-const rd = (date: string, values: Reading['values'], km?: number): Reading => ({ id: `r${id++}`, date, values, km })
-const tarif = (from: string, ap: number, grund = 0, extra: Partial<Tariff> = {}): Tariff => ({
-  id: `t${id++}`, kind: 'haushalt', from, arbeitspreis: ap, grundgebuehr: grund, ...extra,
-})
-const model = (p: Partial<Model> & { s?: Partial<Settings> }): Model => ({
-  readings: [], changes: [], tariffs: [], feedins: [], abschlaege: [],
-  ...p,
-  settings: { ...DEFAULT_SETTINGS, ...p.s },
-})
-const agg = (m: Model, from: string, to: string) => aggregate(computeDaily(m), toDay(from), toDay(to))
+const agg = (m: ReturnType<typeof model>, from: string, to: string) => aggregate(computeDaily(m), toDay(from), toDay(to))
 
 describe('Interpolation', () => {
   const m = model({
@@ -333,47 +324,6 @@ describe('Prognose und Abschläge', () => {
     expect(abschlagSumme([{ ...a[0], to: '2025-03-31' }], toDay('2025-01-01'), toDay('2026-01-01'))).toBe(300)
   })
 
-  it('rechnet ohne Vorjahr linear hoch', () => {
-    const m = model({
-      readings: [rd('2025-01-01', { bezug: 0, einsp: 0 }), rd('2025-07-02', { bezug: 1820, einsp: 364 })],
-      tariffs: [tarif('2025-01-01', 30, 10)],
-      feedins: [{ id: 'f', from: '2025-01-01', ct: 8 }],
-      abschlaege: [{ id: 'a', from: '2025-01-10', betrag: 100 }],
-    })
-    const f = forecast(computeDaily(m), m, toDay('2025-07-02'))!
-    expect(f.method).toBe('linear')
-    expect(f.bezug).toBeCloseTo(3650)
-    expect(f.kosten).toBeCloseTo(3650 * 0.3 + 120)
-    expect(f.verg).toBeCloseTo(730 * 0.08)
-    expect(f.abschlaegeGezahlt).toBe(600)
-    expect(f.abschlaegeKommend).toBe(600)
-    expect(f.differenz).toBeCloseTo(3650 * 0.3 + 120 - 1200)
-  })
-
-  it('gewichtet mit Vorjahresdaten saisonal', () => {
-    // Vorjahr: 1. Halbjahr 10 kWh/Tag, 2. Halbjahr 30 kWh/Tag. Dieses Jahr bisher 20 % mehr.
-    const h1 = toDay('2024-07-01') - toDay('2024-01-01')
-    const h2 = toDay('2025-01-01') - toDay('2024-07-01')
-    const d25 = toDay('2025-07-01') - toDay('2025-01-01')
-    const m = model({
-      readings: [
-        rd('2024-01-01', { bezug: 0, einsp: 0 }),
-        rd('2024-07-01', { bezug: h1 * 10, einsp: 0 }),
-        rd('2025-01-01', { bezug: h1 * 10 + h2 * 30, einsp: 0 }),
-        rd('2025-07-01', { bezug: h1 * 10 + h2 * 30 + d25 * 12, einsp: 0 }),
-      ],
-      tariffs: [tarif('2024-01-01', 30)],
-    })
-    const f = forecast(computeDaily(m), m, toDay('2025-07-01'))!
-    expect(f.method).toBe('saisonal')
-    const rest = dayOf(2026, 0, 1) - toDay('2025-07-01')
-    // Vergleichszeitraum liegt komplett im 1. Halbjahr 2024 → Skalierung 1,2.
-    // 2024 ist ein Schaltjahr: der erste Prognosetag fällt auf den 30.6.2024 (10 kWh).
-    const scale = 1.2
-    expect(f.bezug).toBeCloseTo(d25 * 12 + ((rest - 1) * 30 + 10) * scale, 3)
-    // linear wären es nur 12 kWh/Tag
-    expect(f.bezug).toBeGreaterThan(365 * 12 * 1.5)
-  })
 })
 
 describe('Plausibilitätscheck', () => {
@@ -397,7 +347,7 @@ describe('Plausibilitätscheck', () => {
 
 describe('Demo-Datensatz', () => {
   const demo = buildDemo('2026-11-12')
-  const m = model({ ...demo })
+  const m = model({ ...demo, s: { house: demo.house } })
   const daily = computeDaily(m)
 
   it('umfasst rund zwei Jahre mit plausiblen Werten', () => {
@@ -416,9 +366,8 @@ describe('Demo-Datensatz', () => {
   })
 
   it('liefert Prognose und Empfehlungen', () => {
-    const f = forecast(daily, m, toDay('2026-11-12'))!
-    expect(f.method).toBe('saisonal')
-    expect(f.kosten).toBeGreaterThan(f.kostenBisher)
+    const f = smartForecast(daily, m, { wx: new Map(), clim: GERMANY, today: toDay('2026-11-12') })!
+    expect(f.jahr.kosten).toBeGreaterThan(kpis(aggregate(daily, toDay('2026-01-01'), daily.end)).kosten)
     const a = advise(daily, model({ ...demo, s: { advice: { wpAp: 24, wpGrund: 6, zaehlerJahr: 30, m1Pauschale: 150 } } }))!
     expect(a.rechnungen.map((r) => r.id)).toEqual(['wp-tarif', '14a-m1'])
   })

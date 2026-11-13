@@ -14,9 +14,29 @@ const clean = (s: string) => s.replace('-', '−')
 /** Deutsche Zahl mit fester Nachkommastellenzahl. */
 export const num = (v: number, digits = 1) => clean(get(digits, digits).format(v))
 
-/** kWh: unter 100 eine Nachkommastelle, darüber ganzzahlig. */
-export const kwhDigits = (v: number) => (Math.abs(v) < 100 ? 1 : 0)
+/** Anzeige-Einstellungen aus dem Meisterbereich */
+let disp = { kwhDecimals: -1, mwh: false }
+export const setDisplay = (d: Partial<typeof disp>) => {
+  disp = { ...disp, ...d }
+}
+
+/** kWh: automatisch unter 100 eine Nachkommastelle, darüber ganzzahlig – oder fest eingestellt. */
+export const kwhDigits = (v: number) => (disp.kwhDecimals >= 0 ? disp.kwhDecimals : Math.abs(v) < 100 ? 1 : 0)
 export const kwh = (v: number) => num(v, kwhDigits(v))
+
+/** Energie mit Einheit; ab 1.000 kWh optional in MWh. */
+export function energy(v: number): { v: number; digits: number; unit: string } {
+  if (disp.mwh && Math.abs(v) >= 1000) return { v: v / 1000, digits: 2, unit: 'MWh' }
+  return { v, digits: kwhDigits(v), unit: 'kWh' }
+}
+export const kwhU = (v: number) => {
+  const e = energy(v)
+  return `${num(e.v, e.digits)} ${e.unit}`
+}
+
+/** Menge in beliebiger Einheit mit festen Nachkommastellen. */
+export const qty = (v: number, unit: string, decimals: number) =>
+  unit === 'kWh' ? kwhU(v) : `${num(v, Math.abs(v) >= 100 ? Math.min(decimals, 1) : decimals)} ${unit}`
 
 /** Euro: unter 100 mit Cent, darüber ganzzahlig. */
 export const eurDigits = (v: number) => (Math.abs(v) < 100 ? 2 : 0)

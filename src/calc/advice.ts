@@ -1,6 +1,6 @@
 import { toDay } from '../lib/dates'
 import type { Model, Reading } from '../types'
-import { aggregate, feedInAt, kpis, offsetAt, tariffAt, type Daily, type Point, type SeriesKey } from './engine'
+import { aggregate, feedInAt, kpis, offsetAt, tariffAt, type Daily, type Point } from './engine'
 
 export interface Advice {
   id: string
@@ -144,7 +144,7 @@ export function checkField(
   points: Point[],
   readings: Reading[],
   model: Pick<Model, 'changes'>,
-  key: SeriesKey,
+  key: string,
   date: string,
   raw: number | undefined,
   ignoreId?: string,
@@ -159,7 +159,7 @@ export function checkField(
   // Delta: gegenüber der letzten echten Ablesung, auch über einen Zählerwechsel hinweg.
   const readingDays = new Set(
     readings
-      .filter((r) => r.id !== ignoreId && (key === 'km' ? r.km : r.values[key]) !== undefined)
+      .filter((r) => r.id !== ignoreId && r.values[key] !== undefined)
       .map((r) => toDay(r.date)),
   )
   const prev = [...before].reverse().find((p) => readingDays.has(p.day)) ?? last

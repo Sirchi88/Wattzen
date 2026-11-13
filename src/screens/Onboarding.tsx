@@ -105,7 +105,7 @@ export function Onboarding({ model, series }: { model: Model; series: Series }) 
           <>
             <h1>Deine erste Ablesung</h1>
             <p className="muted">Netzbezug und Einspeisung vom Hauptzähler genügen. Der Rest macht die Auswertung genauer.</p>
-            <EntryForm model={model} series={series} saveLabel="Speichern und weiter" onSaved={() => setStep(2)} />
+            <EntryForm model={model} series={series} saveLabel="Speichern und weiter" inline onSaved={() => setStep(2)} />
             {model.readings.length > 0 && (
               <button type="button" className="btn ghost" onClick={() => setStep(2)}>
                 Überspringen
@@ -118,7 +118,7 @@ export function Onboarding({ model, series }: { model: Model; series: Series }) 
           <div className="onb-done">
             <div className="empty-mark" aria-hidden />
             <h1>Fertig.</h1>
-            <p className="muted">Noch eine Ablesung, dann gibt’s die erste Auswertung. Tarife, Abschläge und alle Optionen findest du im Elektromeisterbereich oben rechts.</p>
+            <p className="muted">Noch eine Ablesung, dann gibt’s die erste Auswertung. Tarife, Abschläge, Zähler und dein Haus richtest du unter „Meister“ unten rechts ein.</p>
             <button type="button" className="btn primary big" onClick={() => void saveSettings({ onboarded: true })}>
               Los geht’s
             </button>

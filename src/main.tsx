@@ -1,5 +1,6 @@
 import '@fontsource-variable/geist'
 import '@fontsource-variable/geist-mono'
+import '@fontsource/caveat/500.css'
 import './styles.css'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'

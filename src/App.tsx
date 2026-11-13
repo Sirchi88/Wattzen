@@ -1,29 +1,47 @@
-import { useEffect, useMemo, useState } from 'react'
+import { ChartColumn, History as HistoryIcon, LayoutGrid, PenLine, Wrench } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { computeDaily } from './calc/engine'
-import { applyTheme, exportJson, useModel } from './db'
+import { ablesungFaellig } from './calc/finance'
+import { applyTheme, useModel } from './db'
 import { toDay, todayIso } from './lib/dates'
+import { setDisplay } from './lib/format'
 import { Admin } from './screens/Admin'
 import { Dashboard } from './screens/Dashboard'
 import { Entry } from './screens/Entry'
 import { History } from './screens/History'
 import { Onboarding } from './screens/Onboarding'
-import { Wordmark } from './ui/bits'
+import { Overview } from './screens/Overview'
+import type { View } from './types'
+import { haptic, setHaptics, ToastHost, Wordmark } from './ui/bits'
+import { Splash } from './ui/Splash'
+import { useWeather } from './weather'
 
-type View = 'entry' | 'dash' | 'history' | 'admin'
-const NAV: { view: View; label: string }[] = [
-  { view: 'entry', label: 'Erfassen' },
-  { view: 'dash', label: 'Auswertung' },
-  { view: 'history', label: 'Verlauf' },
+const NAV: { view: View; label: string; title: string; Icon: typeof LayoutGrid }[] = [
+  { view: 'overview', label: 'Übersicht', title: 'Übersicht', Icon: LayoutGrid },
+  { view: 'dash', label: 'Auswertung', title: 'Auswertung', Icon: ChartColumn },
+  { view: 'entry', label: 'Erfassen', title: 'Erfassen', Icon: PenLine },
+  { view: 'history', label: 'Verlauf', title: 'Verlauf', Icon: HistoryIcon },
+  { view: 'admin', label: 'Meister', title: 'Elektromeister', Icon: Wrench },
 ]
+
+let splashShown = false
 
 export function App() {
   const model = useModel()
   const [view, setView] = useState<View>()
   const [editId, setEditId] = useState<string>()
-  const [hideBackup, setHideBackup] = useState(false)
+  const [splash, setSplash] = useState(!splashShown)
   const daily = useMemo(() => (model ? computeDaily(model) : undefined), [model])
+  const weather = useWeather(model?.settings.house, daily && daily.days.length ? daily.start : undefined)
 
-  const theme = model?.settings.theme
+  const s = model?.settings
+  useEffect(() => {
+    if (!s) return
+    setDisplay({ kwhDecimals: s.kwhDecimals, mwh: s.mwh })
+    setHaptics(s.haptics)
+  }, [s])
+
+  const theme = s?.theme
   useEffect(() => {
     if (!theme) return
     applyTheme(theme)
@@ -34,81 +52,75 @@ export function App() {
     return () => mq.removeEventListener('change', on)
   }, [theme])
 
-  if (!model || !daily) return <div className="boot" aria-busy="true" />
+  const endSplash = useCallback(() => {
+    splashShown = true
+    setSplash(false)
+  }, [])
+
+  if (!model || !daily || !s) return <div className="boot" aria-busy="true" />
+  if (splash && s.splash) return <Splash seconds={s.splashDauer} onDone={endSplash} />
   if (!model.settings.onboarded) return <Onboarding model={model} series={daily.series} />
 
-  const cur: View = view ?? (model.readings.length >= 2 ? 'dash' : 'entry')
+  const start: View = model.readings.length >= 2 ? s.startView : 'entry'
+  const cur: View = view ?? start
   const go = (v: View) => {
+    haptic()
     setEditId(undefined)
     setView(v)
     window.scrollTo({ top: 0 })
   }
-
-  // Dezente Backup-Erinnerung: letztes Backup (oder erste Ablesung) älter als 30 Tage
   const today = toDay(todayIso())
-  const since = model.settings.lastBackup
-    ? today - toDay(model.settings.lastBackup.slice(0, 10))
-    : model.readings.length
-      ? today - toDay(model.readings[0].date)
-      : 0
-  const backupDue = !hideBackup && !model.settings.demo && model.readings.length > 0 && since > 30
+  const due = s.dueDot && ablesungFaellig(model, today)
+  const title = editId ? 'Ablesung bearbeiten' : NAV.find((n) => n.view === cur)!.title
 
   return (
-    <div className="app">
-      <header className="bar">
-        <button type="button" className="brand" onClick={() => go('dash')} aria-label="WATTZEN – zur Auswertung">
-          <Wordmark />
-        </button>
-        <nav className="nav" aria-label="Hauptnavigation">
-          {NAV.map((n) => (
-            <button key={n.view} type="button" className={cur === n.view ? 'on' : ''} aria-current={cur === n.view ? 'page' : undefined} onClick={() => go(n.view)}>
-              {n.label}
+    <ToastHost>
+      <div className="app">
+        <header className="bar">
+          <h1 className="bar-title">{title}</h1>
+          <button type="button" className="brand" onClick={() => go('overview')} aria-label="WATTZEN – zur Übersicht">
+            <Wordmark />
+          </button>
+        </header>
+
+        <main key={cur + (editId ?? '')} className="main">
+          {cur === 'overview' && <Overview model={model} daily={daily} weather={weather} go={go} />}
+          {cur === 'dash' && <Dashboard model={model} daily={daily} weather={weather} goEntry={() => go('entry')} />}
+          {cur === 'entry' && (
+            <Entry model={model} series={daily.series} editId={editId} onDone={() => go('history')} />
+          )}
+          {cur === 'history' && (
+            <History
+              model={model}
+              goEntry={() => go('entry')}
+              onEdit={(id) => {
+                setEditId(id)
+                setView('entry')
+                window.scrollTo({ top: 0 })
+              }}
+            />
+          )}
+          {cur === 'admin' && <Admin model={model} daily={daily} weather={weather} />}
+        </main>
+
+        <nav className="tabbar" aria-label="Hauptnavigation">
+          {NAV.map(({ view: v, label, Icon }) => (
+            <button
+              key={v}
+              type="button"
+              className={`tab${cur === v ? ' on' : ''}${v === 'entry' ? ' tab-main' : ''}`}
+              aria-current={cur === v ? 'page' : undefined}
+              onClick={() => go(v)}
+            >
+              <span className="tab-ic">
+                <Icon size={v === 'entry' ? 24 : 21} strokeWidth={v === 'entry' ? 2 : 1.6} aria-hidden />
+                {v === 'entry' && due && <i className="due" aria-label="Ablesung fällig" />}
+              </span>
+              <span className="tab-label">{label}</span>
             </button>
           ))}
         </nav>
-        <button
-          type="button"
-          className={`admin-btn${cur === 'admin' ? ' on' : ''}`}
-          onClick={() => go(cur === 'admin' ? 'dash' : 'admin')}
-          aria-label="Elektromeisterbereich"
-          title="Elektromeisterbereich"
-        >
-          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden>
-            <path d="M13 3 5 13.5h6L10 21l8-10.5h-6L13 3Z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
-          </svg>
-        </button>
-      </header>
-
-      {backupDue && (
-        <p className="backup" role="status">
-          <span>{model.settings.lastBackup ? `Letztes Backup vor ${since} Tagen.` : 'Noch kein Backup – die Daten liegen nur auf diesem Gerät.'}</span>
-          <button type="button" className="link" onClick={() => void exportJson(model)}>
-            Jetzt sichern
-          </button>
-          <button type="button" className="link dim" onClick={() => setHideBackup(true)} aria-label="Hinweis ausblenden">
-            Später
-          </button>
-        </p>
-      )}
-
-      <main key={cur}>
-        {cur === 'entry' && (
-          <Entry model={model} series={daily.series} editId={editId} onDone={() => go('history')} goDash={() => go('dash')} />
-        )}
-        {cur === 'dash' && <Dashboard model={model} daily={daily} goEntry={() => go('entry')} />}
-        {cur === 'history' && (
-          <History
-            model={model}
-            goEntry={() => go('entry')}
-            onEdit={(id) => {
-              setEditId(id)
-              setView('entry')
-              window.scrollTo({ top: 0 })
-            }}
-          />
-        )}
-        {cur === 'admin' && <Admin model={model} daily={daily} />}
-      </main>
-    </div>
+      </div>
+    </ToastHost>
   )
 }
